@@ -13,208 +13,185 @@
 
 if (!defined('ABSPATH')) exit;
 
-class WC_POS_Stock_Sync {
-    private $options;
-    private $report = '';
+class WC_UltimatePOS_Sync {
+    private $option_name = 'wc_ultimatepos_settings';
+    private $log_option = 'wc_ultimatepos_log';
 
     public function __construct() {
-        $this->options = get_option('wc_pos_stock_sync_options');
-
-        add_action('admin_menu', [$this, 'create_admin_menu']);
+        add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'register_settings']);
-        add_action('wc_pos_stock_sync_cron', [$this, 'update_stocks']);
-        add_filter('cron_schedules', [$this, 'add_cron_schedules']);
+        add_action('wc_ultimatepos_cron_hook', [$this, 'sync_inventory']);
 
-        // Handle manual update button action
-        add_action('admin_post_wc_pos_stock_sync_manual_update', [$this, 'handle_manual_update']);
+        $settings = get_option($this->option_name);
+        if (!empty($settings['cron_enabled']) && !wp_next_scheduled('wc_ultimatepos_cron_hook')) {
+            if (!empty($settings['cron_minutes']) && is_numeric($settings['cron_minutes'])) {
+                add_filter('cron_schedules', function($schedules) use ($settings) {
+                    $interval = intval($settings['cron_minutes']) * 60;
+                    $schedules['every_custom_minutes'] = [
+                        'interval' => $interval,
+                        'display' => "Every {$settings['cron_minutes']} minutes"
+                    ];
+                    return $schedules;
+                });
+                wp_schedule_event(time(), 'every_custom_minutes', 'wc_ultimatepos_cron_hook');
+            } else {
+                wp_schedule_event(time(), $settings['cron_interval'] ?? 'hourly', 'wc_ultimatepos_cron_hook');
+            }
+        }
     }
 
-    public function create_admin_menu() {
-        add_options_page(
-            'POS Stock Sync',
-            'POS Stock Sync',
-            'manage_options',
-            'wc-pos-stock-sync',
-            [$this, 'admin_page']
-        );
-    }
-
-    public function admin_page() {
-        ?>
-        <div class="wrap">
-            <h1>POS Stock Sync Settings</h1>
-            <?php if (!empty($_GET['updated_now'])): ?>
-                <div class="notice notice-success">
-                    <p><strong>Manual Update Report:</strong></p>
-                    <pre><?php echo esc_html(get_transient('wc_pos_stock_sync_report')); ?></pre>
-                </div>
-            <?php endif; ?>
-            <form method="post" action="options.php">
-                <?php
-                settings_fields('wc_pos_stock_sync_group');
-                do_settings_sections('wc-pos-stock-sync');
-                submit_button();
-                ?>
-            </form>
-            <form method="post" action="<?php echo admin_url('admin-post.php'); ?>">
-                <input type="hidden" name="action" value="wc_pos_stock_sync_manual_update">
-                <?php wp_nonce_field('wc_pos_stock_sync_manual_update'); ?>
-                <p>
-                    <button type="submit" class="button button-primary">Update Stock Now</button>
-                </p>
-            </form>
-        </div>
-        <?php
+    public function add_admin_menu() {
+        add_menu_page('Ultimate POS Sync', 'Ultimate POS Sync', 'manage_options', 'wc_ultimatepos_sync', [$this, 'admin_page']);
     }
 
     public function register_settings() {
-        register_setting('wc_pos_stock_sync_group', 'wc_pos_stock_sync_options', [$this, 'sanitize_settings']);
-
-        add_settings_section('wc_pos_stock_sync_section', 'Database Settings', null, 'wc-pos-stock-sync');
-
-        add_settings_field('db_host', 'DB Host', [$this, 'text_field'], 'wc-pos-stock-sync', 'wc_pos_stock_sync_section', ['label_for' => 'db_host']);
-        add_settings_field('db_name', 'DB Name', [$this, 'text_field'], 'wc-pos-stock-sync', 'wc_pos_stock_sync_section', ['label_for' => 'db_name']);
-        add_settings_field('db_user', 'DB User', [$this, 'text_field'], 'wc-pos-stock-sync', 'wc_pos_stock_sync_section', ['label_for' => 'db_user']);
-        add_settings_field('db_pass', 'DB Password', [$this, 'text_field'], 'wc-pos-stock-sync', 'wc_pos_stock_sync_section', ['label_for' => 'db_pass']);
-        add_settings_field('auto_update', 'Auto Update', [$this, 'checkbox_field'], 'wc-pos-stock-sync', 'wc_pos_stock_sync_section', ['label_for' => 'auto_update']);
-        add_settings_field('update_interval', 'Update Interval (minutes)', [$this, 'number_field'], 'wc-pos-stock-sync', 'wc_pos_stock_sync_section', ['label_for' => 'update_interval']);
+        register_setting('wc_ultimatepos_sync', $this->option_name);
     }
 
-    public function text_field($args) {
-        $id = $args['label_for'];
-        $value = isset($this->options[$id]) ? esc_attr($this->options[$id]) : '';
-        echo "<input type='text' id='$id' name='wc_pos_stock_sync_options[$id]' value='$value' class='regular-text'>";
-    }
+    public function admin_page() {
+        $settings = get_option($this->option_name);
+        $log = get_option($this->log_option);
+        ?>
+        <div class="wrap">
+            <h1>Ultimate POS Settings</h1>
+            <form method="post" action="options.php">
+                <?php settings_fields('wc_ultimatepos_sync'); ?>
+                <table class="form-table">
+                    <tr><th>DB Host</th><td><input type="text" name="<?php echo $this->option_name; ?>[db_host]" value="<?php echo esc_attr($settings['db_host'] ?? ''); ?>" /></td></tr>
+                    <tr><th>DB Name</th><td><input type="text" name="<?php echo $this->option_name; ?>[db_name]" value="<?php echo esc_attr($settings['db_name'] ?? ''); ?>" /></td></tr>
+                    <tr><th>DB User</th><td><input type="text" name="<?php echo $this->option_name; ?>[db_user]" value="<?php echo esc_attr($settings['db_user'] ?? ''); ?>" /></td></tr>
+                    <tr><th>DB Password</th><td><input type="password" name="<?php echo $this->option_name; ?>[db_pass]" value="<?php echo esc_attr($settings['db_pass'] ?? ''); ?>" /></td></tr>
+                    <tr><th>Enable Cron Job</th><td><input type="checkbox" name="<?php echo $this->option_name; ?>[cron_enabled]" value="1" <?php checked($settings['cron_enabled'] ?? '', '1'); ?> /></td></tr>
+                    <tr><th>Cron Interval</th><td>
+                        <select name="<?php echo $this->option_name; ?>[cron_interval]">
+                            <option value="hourly" <?php selected($settings['cron_interval'] ?? '', 'hourly'); ?>>Hourly</option>
+                            <option value="twicedaily" <?php selected($settings['cron_interval'] ?? '', 'twicedaily'); ?>>Twice Daily</option>
+                            <option value="daily" <?php selected($settings['cron_interval'] ?? '', 'daily'); ?>>Daily</option>
+                        </select></td></tr>
+                    <tr><th>Custom Interval (minutes)</th><td>
+                        <input type="number" name="<?php echo $this->option_name; ?>[cron_minutes]" min="1" value="<?php echo esc_attr($settings['cron_minutes'] ?? ''); ?>" />
+                        <p class="description">Optional: If set, overrides default intervals above.</p>
+                    </td></tr>
+                </table>
+                <?php submit_button(); ?>
+            </form>
+            <form method="post">
+                <input type="hidden" name="manual_sync_trigger" value="1">
+                <?php submit_button('Run Manual Sync'); ?>
+            </form>
+            <h2>Last Sync Log</h2>
+            <textarea rows="10" cols="100" readonly><?php echo esc_textarea($log); ?></textarea>
+        </div>
+        <?php
 
-    public function number_field($args) {
-        $id = $args['label_for'];
-        $value = isset($this->options[$id]) ? esc_attr($this->options[$id]) : '';
-        echo "<input type='number' id='$id' name='wc_pos_stock_sync_options[$id]' value='$value' min='1' class='small-text'>";
-    }
-
-    public function checkbox_field($args) {
-        $id = $args['label_for'];
-        $checked = isset($this->options[$id]) && $this->options[$id] == '1' ? 'checked' : '';
-        echo "<input type='checkbox' id='$id' name='wc_pos_stock_sync_options[$id]' value='1' $checked>";
-    }
-
-    public function sanitize_settings($input) {
-        $input['db_host'] = sanitize_text_field($input['db_host']);
-        $input['db_name'] = sanitize_text_field($input['db_name']);
-        $input['db_user'] = sanitize_text_field($input['db_user']);
-        $input['db_pass'] = sanitize_text_field($input['db_pass']);
-        $input['auto_update'] = isset($input['auto_update']) ? '1' : '';
-        $input['update_interval'] = intval($input['update_interval']);
-
-        if ($input['auto_update'] == '1' && $input['update_interval'] > 0) {
-            if (!wp_next_scheduled('wc_pos_stock_sync_cron')) {
-                wp_schedule_event(time(), 'wc_pos_stock_sync_interval', 'wc_pos_stock_sync_cron');
-            }
-        } else {
-            wp_clear_scheduled_hook('wc_pos_stock_sync_cron');
+        if (!empty($_POST['manual_sync_trigger'])) {
+            $this->sync_inventory();
+            echo '<div class="updated"><p>Manual sync completed.</p></div>';
         }
-
-        return $input;
     }
 
-    public function add_cron_schedules($schedules) {
-        if (isset($this->options['update_interval']) && $this->options['update_interval'] > 0) {
-            $interval = $this->options['update_interval'] * 60;
-            $schedules['wc_pos_stock_sync_interval'] = [
-                'interval' => $interval,
-                'display'  => 'POS Stock Sync Interval'
-            ];
-        }
-        return $schedules;
-    }
-
-    /**
-     * Manual Update Handler
-     */
-    public function handle_manual_update() {
-        check_admin_referer('wc_pos_stock_sync_manual_update');
-
-        $this->update_stocks();
-
-        wp_redirect(add_query_arg('updated_now', '1', wp_get_referer()));
-        exit;
-    }
-
-    /**
-     * Update Stocks and Report
-     */
-    public function update_stocks() {
+    public function sync_inventory() {
         global $wpdb;
+        $settings = get_option($this->option_name);
+        $log = "";
 
-        $db_host = $this->options['db_host'];
-        $db_name = $this->options['db_name'];
-        $db_user = $this->options['db_user'];
-        $db_pass = $this->options['db_pass'];
-
-        $report = '';
-
-        try {
-            $pdo = new PDO("mysql:host=$db_host;dbname=$db_name", $db_user, $db_pass);
-            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-
-            $sql = "
-                SELECT
-                    P.name AS product_name,
-                    P.sku,
-                    SUM(PL.qty_available) AS total_stock
-                FROM
-                    variations V
-                JOIN
-                    products P ON V.product_id = P.id
-                JOIN
-                    variation_location_details PL ON V.id = PL.variation_id
-                GROUP BY
-                    P.sku, P.name
-                ORDER BY
-                    P.name ASC;
-            ";
-
-            $stmt = $pdo->query($sql);
-            $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-            if ($results) {
-                foreach ($results as $row) {
-                    $sku = $row['sku'];
-                    $stock = intval($row['total_stock']);
-                    $product_id = wc_get_product_id_by_sku($sku);
-
-                    if ($product_id) {
-                        update_post_meta($product_id, '_stock', $stock);
-                        $status = $stock > 0 ? 'instock' : 'outofstock';
-                        update_post_meta($product_id, '_stock_status', $status);
-                        update_post_meta($product_id, '_manage_stock', 'yes');
-
-                        $report .= "✔️ Updated SKU: $sku | Stock: $stock\n";
-                    } else {
-                        $report .= "❌ SKU not found in WooCommerce: $sku\n";
-                    }
-                }
-            } else {
-                $report .= "No products found in POS database.\n";
-            }
-
-        } catch (PDOException $e) {
-            $report .= "Database error: " . $e->getMessage() . "\n";
+        $mysqli = new mysqli($settings['db_host'], $settings['db_user'], $settings['db_pass'], $settings['db_name']);
+        if ($mysqli->connect_errno) {
+            $log = "Database connection failed: " . $mysqli->connect_error;
+            update_option($this->log_option, $log);
+            return;
         }
 
-        // Store report for next admin page load
-        set_transient('wc_pos_stock_sync_report', $report, 60);
-    }
+        $query = "SELECT variations.sub_sku AS sku, variations.default_sell_price AS price, 
+                         SUM(loc.qty_available) AS stock
+                  FROM variations
+                  JOIN variation_location_details loc ON variations.id = loc.variation_id
+                  GROUP BY variations.sub_sku";
 
-    public static function activate() {
-        // Nothing to do here, cron will be set on settings save
-    }
+        if ($result = $mysqli->query($query)) {
+            while ($row = $result->fetch_assoc()) {
+                $sku = $row['sku'];
+                $price = $row['price'];
+                $stock = $row['stock'];
 
-    public static function deactivate() {
-        wp_clear_scheduled_hook('wc_pos_stock_sync_cron');
+                // Get product/variation post ID by SKU
+                $post_id = $wpdb->get_var($wpdb->prepare(
+                    "SELECT post_id FROM {$wpdb->prefix}postmeta WHERE meta_key='_sku' AND meta_value=%s",
+                    $sku
+                ));
+
+                if ($post_id) {
+                    // Update price
+                    $wpdb->update($wpdb->postmeta, ['meta_value' => $price], ['post_id' => $post_id, 'meta_key' => '_regular_price']);
+                    $wpdb->update($wpdb->postmeta, ['meta_value' => $price], ['post_id' => $post_id, 'meta_key' => '_price']);
+
+                    // Update stock
+                    $wpdb->update($wpdb->postmeta, ['meta_value' => $stock], ['post_id' => $post_id, 'meta_key' => '_stock']);
+                    $wpdb->update($wpdb->postmeta, ['meta_value' => 'yes'], ['post_id' => $post_id, 'meta_key' => '_manage_stock']);
+
+                    $log .= "Updated SKU: $sku | Price: $price | Stock: $stock\n";
+                } else {
+                    $log .= "SKU not found: $sku\n";
+                }
+            }
+            $result->free();
+        } else {
+            $log = "Query error: " . $mysqli->error;
+        }
+
+        // --- BEGIN: Update parent product stock by summing variant stocks ---
+
+        // Get all parent IDs for variations
+        $parent_stocks = [];
+
+        // Get all variations with their parent product IDs and stock
+        $variations = $wpdb->get_results("
+            SELECT p.ID AS variation_id, 
+                   pm_sku.meta_value AS sku, 
+                   pm_parent.meta_value AS parent_id
+            FROM {$wpdb->prefix}posts p
+            LEFT JOIN {$wpdb->prefix}postmeta pm_sku ON p.ID = pm_sku.post_id AND pm_sku.meta_key = '_sku'
+            LEFT JOIN {$wpdb->prefix}postmeta pm_parent ON p.post_parent = pm_parent.post_id AND pm_parent.meta_key = '_stock' -- This line is not correct for parent id
+            WHERE p.post_type = 'product_variation'
+        ");
+
+        // Instead, get parent IDs directly from post_parent column:
+        $variations = $wpdb->get_results("
+            SELECT p.ID AS variation_id,
+                   pm_sku.meta_value AS sku,
+                   p.post_parent AS parent_id
+            FROM {$wpdb->prefix}posts p
+            LEFT JOIN {$wpdb->prefix}postmeta pm_sku ON p.ID = pm_sku.post_id AND pm_sku.meta_key = '_sku'
+            WHERE p.post_type = 'product_variation'
+        ");
+
+        foreach ($variations as $var) {
+            $stock = (int)$wpdb->get_var($wpdb->prepare(
+                "SELECT meta_value FROM {$wpdb->prefix}postmeta WHERE post_id = %d AND meta_key = '_stock'",
+                $var->variation_id
+            ));
+
+            if ($var->parent_id) {
+                if (!isset($parent_stocks[$var->parent_id])) {
+                    $parent_stocks[$var->parent_id] = 0;
+                }
+                $parent_stocks[$var->parent_id] += $stock;
+            }
+        }
+
+        // Update the parent products with the summed stock
+        foreach ($parent_stocks as $parent_id => $total_stock) {
+            $wpdb->update($wpdb->postmeta, ['meta_value' => $total_stock], ['post_id' => $parent_id, 'meta_key' => '_stock']);
+            $wpdb->update($wpdb->postmeta, ['meta_value' => 'yes'], ['post_id' => $parent_id, 'meta_key' => '_manage_stock']);
+            $log .= "Updated parent product ID $parent_id with stock: $total_stock\n";
+        }
+
+        // --- END: Update parent product stock ---
+
+        $mysqli->close();
+        update_option($this->log_option, $log . "Last Sync: " . current_time('mysql'));
     }
 }
 
-$wc_pos_stock_sync = new WC_POS_Stock_Sync();
-register_activation_hook(__FILE__, ['WC_POS_Stock_Sync', 'activate']);
-register_deactivation_hook(__FILE__, ['WC_POS_Stock_Sync', 'deactivate']);
+new WC_UltimatePOS_Sync();
+/* Developed by nerghum */
